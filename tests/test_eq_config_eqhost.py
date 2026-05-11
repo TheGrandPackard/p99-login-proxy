@@ -31,13 +31,14 @@ def _write(path, content: str) -> None:
 
 def test_enable_with_custom_content_snapshots_verbatim(eqhost):
     path, backup = eqhost
-    _write(path, "Host=guild.example.com:5998\n# old comment\n")
+    _write(path, "[LoginServer]\nHost=guild.example.com:5998\n# old comment\n")
 
     ok, err = eq_config.enable_proxy()
 
     assert ok and err is None
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_PROXY_ADDRESS + "\n"
-    assert backup.read_text(encoding="utf-8") == "Host=guild.example.com:5998\n# old comment\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS)
+    assert path.read_text(encoding="utf-8").startswith("[LoginServer]\n")
+    assert backup.read_text(encoding="utf-8") == "[LoginServer]\nHost=guild.example.com:5998\n# old comment\n"
 
 
 def test_enable_does_not_overwrite_existing_backup(eqhost):
@@ -53,13 +54,13 @@ def test_enable_does_not_overwrite_existing_backup(eqhost):
 
 def test_enable_when_already_proxy_only_writes_synthetic_default_backup(eqhost):
     path, backup = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\n")
+    _write(path, eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS))
 
     ok, _ = eq_config.enable_proxy()
 
     assert ok
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_PROXY_ADDRESS + "\n"
-    assert backup.read_text(encoding="utf-8") == eq_config.DEFAULT_LOGIN_SERVER + "\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS)
+    assert backup.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_LOGIN_SERVER)
 
 
 def test_enable_when_eqhost_missing_writes_synthetic_default_backup(eqhost):
@@ -69,62 +70,62 @@ def test_enable_when_eqhost_missing_writes_synthetic_default_backup(eqhost):
     ok, _ = eq_config.enable_proxy()
 
     assert ok
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_PROXY_ADDRESS + "\n"
-    assert backup.read_text(encoding="utf-8") == eq_config.DEFAULT_LOGIN_SERVER + "\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS)
+    assert backup.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_LOGIN_SERVER)
 
 
 def test_enable_when_only_commented_hosts_writes_synthetic_default_backup(eqhost):
     path, backup = eqhost
-    _write(path, "# Host=login.eqemulator.net:5998\n# Host=other.example.com:5998\n")
+    _write(path, "[LoginServer]\n# Host=login.eqemulator.net:5998\n# Host=other.example.com:5998\n")
 
     ok, _ = eq_config.enable_proxy()
 
     assert ok
-    assert backup.read_text(encoding="utf-8") == eq_config.DEFAULT_LOGIN_SERVER + "\n"
+    assert backup.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_LOGIN_SERVER)
 
 
 def test_disable_with_backup_restores_and_consumes_backup(eqhost):
     path, backup = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\n")
-    _write(backup, "Host=guild.example.com:5998\n")
+    _write(path, eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS))
+    _write(backup, "[LoginServer]\nHost=guild.example.com:5998\n")
 
     ok, err = eq_config.disable_proxy()
 
     assert ok and err is None
-    assert path.read_text(encoding="utf-8") == "Host=guild.example.com:5998\n"
+    assert path.read_text(encoding="utf-8") == "[LoginServer]\nHost=guild.example.com:5998\n"
     assert not backup.exists()
 
 
 def test_disable_without_backup_writes_default(eqhost):
     path, backup = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\n")
+    _write(path, eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS))
 
     ok, _ = eq_config.disable_proxy()
 
     assert ok
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_LOGIN_SERVER + "\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_LOGIN_SERVER)
     assert not backup.exists()
 
 
 def test_restore_backup_without_backup_returns_error(eqhost):
     path, _ = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\n")
+    _write(path, eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS))
 
     ok, err = eq_config.restore_backup()
 
     assert not ok
     assert err and "backup" in err.lower()
     # eqhost.txt unchanged
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_PROXY_ADDRESS + "\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS)
 
 
 def test_full_enable_disable_roundtrip(eqhost):
     path, backup = eqhost
-    original = "Host=guild.example.com:5998\n# old comment\n"
+    original = "[LoginServer]\nHost=guild.example.com:5998\n# old comment\n"
     _write(path, original)
 
     eq_config.enable_proxy()
-    assert path.read_text(encoding="utf-8") == eq_config.DEFAULT_PROXY_ADDRESS + "\n"
+    assert path.read_text(encoding="utf-8") == eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS)
 
     eq_config.disable_proxy()
     assert path.read_text(encoding="utf-8") == original
@@ -133,7 +134,7 @@ def test_full_enable_disable_roundtrip(eqhost):
 
 def test_is_using_proxy_true_only_for_single_proxy_line(eqhost):
     path, _ = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\n")
+    _write(path, eq_config._eqhost_content(eq_config.DEFAULT_PROXY_ADDRESS))
     using, eqpath = eq_config.is_using_proxy()
     assert using is True
     assert eqpath == str(path)
@@ -141,14 +142,14 @@ def test_is_using_proxy_true_only_for_single_proxy_line(eqhost):
 
 def test_is_using_proxy_false_when_proxy_with_other_active_host(eqhost):
     path, _ = eqhost
-    _write(path, eq_config.DEFAULT_PROXY_ADDRESS + "\nHost=other.example.com:5998\n")
+    _write(path, "[LoginServer]\n" + eq_config.DEFAULT_PROXY_ADDRESS + "\nHost=other.example.com:5998\n")
     using, _ = eq_config.is_using_proxy()
     assert using is False
 
 
 def test_is_using_proxy_ignores_commented_proxy_lines(eqhost):
     path, _ = eqhost
-    _write(path, "# " + eq_config.DEFAULT_PROXY_ADDRESS + "\nHost=login.eqemulator.net:5998\n")
+    _write(path, "[LoginServer]\n# " + eq_config.DEFAULT_PROXY_ADDRESS + "\nHost=login.eqemulator.net:5998\n")
     using, _ = eq_config.is_using_proxy()
     assert using is False
 
