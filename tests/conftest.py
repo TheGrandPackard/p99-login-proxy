@@ -30,13 +30,17 @@ def _reset_local_characters_state(tmp_path, monkeypatch):
         "AUTO_ADD": config.AUTO_ADD_LOCAL_CHARACTERS,
         "LOCAL_CHARACTERS_FILE": config.LOCAL_CHARACTERS_FILE,
         "pending": local_characters._pending_local_account,
+        "pending_ts": local_characters._pending_local_account_ts,
         "on_updated": list(local_characters.ON_UPDATED),
+        "on_auto_bind_candidate": list(local_characters.ON_AUTO_BIND_CANDIDATE),
     }
 
     config.LOCAL_CHARACTERS.clear()
     config.LOCAL_CHARACTER_NAMES.clear()
     local_characters._pending_local_account = None
+    local_characters._pending_local_account_ts = 0.0
     local_characters.ON_UPDATED.clear()
+    local_characters.ON_AUTO_BIND_CANDIDATE.clear()
 
     monkeypatch.setattr(config, "LOCAL_CHARACTERS_FILE", str(tmp_path / "local_characters.csv"))
 
@@ -58,4 +62,6 @@ def _reset_local_characters_state(tmp_path, monkeypatch):
     config.LOCAL_ACCOUNT_NAME_MAP.update(saved["LOCAL_ACCOUNT_NAME_MAP"])
     config.AUTO_ADD_LOCAL_CHARACTERS = saved["AUTO_ADD"]
     local_characters._pending_local_account = saved["pending"]
+    local_characters._pending_local_account_ts = saved["pending_ts"]
     local_characters.ON_UPDATED[:] = saved["on_updated"]
+    local_characters.ON_AUTO_BIND_CANDIDATE[:] = saved["on_auto_bind_candidate"]

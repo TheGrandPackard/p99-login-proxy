@@ -74,7 +74,7 @@ def _classify_character(character_name: str) -> tuple[bool, bool]:
 
 
 class LogFileHandler(FileSystemEventHandler):
-    def __init__(self, get_latest_log_file, timer_parent: QWidget):
+    def __init__(self, log_dir: str, get_latest_log_file, timer_parent: QWidget):
         super().__init__()
         from PySide6.QtCore import QTimer
 
@@ -84,6 +84,13 @@ class LogFileHandler(FileSystemEventHandler):
         self.get_latest_log_file = get_latest_log_file
         self._position = 0
         self._first_event_logged = False
+        # Files already seen by this process (present at startup, or already
+        # switched to). Used to distinguish a genuinely new log file (a real new
+        # login/character) from an old file merely regaining the highest mtime in
+        # the directory for an unrelated reason (backup/AV/cloud-sync touching it,
+        # a manual open, etc) - only the former should trigger local-character
+        # auto-add.
+        self._known_files: set[str] = _list_log_files(log_dir)
         self.latest_log_file = self.get_latest_log_file()
         if self.latest_log_file and _any_character_tracked():
             logger.info(
@@ -145,11 +152,14 @@ class LogFileHandler(FileSystemEventHandler):
         if latest != self.latest_log_file:
             character_name = _character_from_log_path(latest) if latest else "?"
             logger.info("Switched to log file: %s (character: %s)", latest, character_name)
+            is_new_file = bool(latest) and latest not in self._known_files
             self.latest_log_file = latest
             self._seek_to_latest_position()
             self.send_heartbeat()
             if latest:
-                local_characters.try_auto_create(character_name)
+                self._known_files.add(latest)
+                if is_new_file:
+                    local_characters.try_auto_create(character_name)
         if event.src_path == self.latest_log_file:
             with open(self.latest_log_file, errors="ignore") as f:
                 f.seek(self._position)
@@ -336,6 +346,10 @@ def _make_get_latest_log_file(log_dir: str):
     return get_latest_log_file
 
 
+def _list_log_files(log_dir: str) -> set[str]:
+    return set(glob.glob(os.path.join(log_dir, "eqlog_*.txt")))
+
+
 def set_log_watch_directory(eq_directory, timer_parent: QWidget):
     global LOG_WATCH_DIRECTORY, LOG_HANDLER, LOG_OBSERVER, LOG_OBSERVER_THREAD
     global INVENTORY_OBSERVER, INVENTORY_OBSERVER_THREAD
@@ -377,7 +391,7 @@ def set_log_watch_directory(eq_directory, timer_parent: QWidget):
                 root_label,
                 len(log_files),
             )
-            handler = LogFileHandler(get_latest_log_file, timer_parent)
+            handler = LogFileHandler(log_directory, get_latest_log_file, timer_parent)
             if i == 0:
                 LOG_WATCH_DIRECTORY = log_directory
                 LOG_HANDLER = handler

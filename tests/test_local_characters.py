@@ -14,6 +14,13 @@ def _seed_local_account(name: str = "acct1", password: str = "pw") -> None:
     config.LOCAL_ACCOUNTS[name.lower()] = {"password": password, "aliases": []}
 
 
+def _capture_candidates() -> list[tuple[str, str]]:
+    """Subscribe a recorder to ON_AUTO_BIND_CANDIDATE and return the list it fills."""
+    seen: list[tuple[str, str]] = []
+    local_characters.ON_AUTO_BIND_CANDIDATE.append(lambda name, account: seen.append((name, account)))
+    return seen
+
+
 # ---- note_login -----------------------------------------------------------
 
 
@@ -55,11 +62,36 @@ def test_try_auto_create_no_pending_returns_false():
     assert "toald" not in config.LOCAL_CHARACTERS
 
 
-def test_try_auto_create_happy_path_adds_row():
+def test_try_auto_create_surfaces_candidate_without_persisting():
+    # try_auto_create no longer persists on its own - it must not add the row or
+    # make the name usable for a credential rewrite until a human confirms it via
+    # ON_AUTO_BIND_CANDIDATE / confirm_auto_bind.
     _seed_local_account("acct1")
     local_characters.note_login("local", "acct1")
+    candidates = _capture_candidates()
 
     assert local_characters.try_auto_create("Toald") is True
+
+    assert candidates == [("Toald", "acct1")]
+    assert "toald" not in config.LOCAL_CHARACTER_NAMES
+    assert "toald" not in config.LOCAL_CHARACTERS
+
+
+def test_try_auto_create_local_char_method_seeds_pending():
+    _seed_local_account("acct1")
+    local_characters.note_login("local_char", "acct1")
+    candidates = _capture_candidates()
+
+    assert local_characters.try_auto_create("Toald") is True
+    assert candidates == [("Toald", "acct1")]
+
+
+def test_confirm_auto_bind_happy_path_adds_row():
+    _seed_local_account("acct1")
+    local_characters.note_login("local", "acct1")
+    assert local_characters.try_auto_create("Toald") is True
+
+    assert local_characters.confirm_auto_bind("Toald", "acct1") is True
 
     assert "toald" in config.LOCAL_CHARACTER_NAMES
     entry = config.LOCAL_CHARACTERS["toald"]
@@ -69,12 +101,67 @@ def test_try_auto_create_happy_path_adds_row():
     assert entry["level"] is None
 
 
-def test_try_auto_create_local_char_method_seeds_pending():
+def test_confirm_auto_bind_rejects_removed_account():
     _seed_local_account("acct1")
-    local_characters.note_login("local_char", "acct1")
+    local_characters.note_login("local", "acct1")
+    assert local_characters.try_auto_create("Toald") is True
+
+    config.LOCAL_ACCOUNTS.pop("acct1", None)
+
+    assert local_characters.confirm_auto_bind("Toald", "acct1") is False
+    assert "toald" not in config.LOCAL_CHARACTER_NAMES
+
+
+def test_confirm_auto_bind_rejects_character_bound_in_the_meantime():
+    _seed_local_account("acct1")
+    _seed_local_account("acct2")
+    local_characters.note_login("local", "acct1")
+    assert local_characters.try_auto_create("Toald") is True
+
+    # Something else (e.g. a manual add) bound the name before the human confirmed.
+    local_characters.set_entry(
+        {"name": "Toald", "account": "acct2", "class": None, "level": None, "bind": None, "park": None, "items": {}}
+    )
+
+    assert local_characters.confirm_auto_bind("Toald", "acct1") is False
+    assert config.LOCAL_CHARACTERS["toald"]["account"] == "acct2"
+
+
+def test_pending_account_is_single_use():
+    # A pending login must only ever be offered to one candidate, even if it's
+    # declined/ignored - otherwise it can silently attach to every later
+    # first-sighting until some unrelated login resets it.
+    _seed_local_account("acct1")
+    local_characters.note_login("local", "acct1")
+    candidates = _capture_candidates()
 
     assert local_characters.try_auto_create("Toald") is True
-    assert config.LOCAL_CHARACTERS["toald"]["account"] == "acct1"
+    assert local_characters.try_auto_create("SomeoneElse") is False
+
+    assert candidates == [("Toald", "acct1")]
+
+
+def test_pending_account_expires_after_ttl(monkeypatch):
+    _seed_local_account("acct1")
+    local_characters.note_login("local", "acct1")
+    candidates = _capture_candidates()
+
+    # Simulate the pending marker aging past the TTL before a new file shows up.
+    local_characters._pending_local_account_ts -= local_characters._PENDING_LOCAL_LOGIN_TTL_SECONDS + 1
+
+    assert local_characters.try_auto_create("Toald") is False
+    assert candidates == []
+
+
+def test_pending_account_within_ttl_still_works():
+    _seed_local_account("acct1")
+    local_characters.note_login("local", "acct1")
+    candidates = _capture_candidates()
+
+    local_characters._pending_local_account_ts -= local_characters._PENDING_LOCAL_LOGIN_TTL_SECONDS - 1
+
+    assert local_characters.try_auto_create("Toald") is True
+    assert candidates == [("Toald", "acct1")]
 
 
 def test_try_auto_create_disabled_by_config_flag():
@@ -133,9 +220,11 @@ def test_try_auto_create_two_consecutive_characters():
 
     local_characters.note_login("local", "acct1")
     assert local_characters.try_auto_create("Alice") is True
+    assert local_characters.confirm_auto_bind("Alice", "acct1") is True
 
     local_characters.note_login("local", "acct2")
     assert local_characters.try_auto_create("Bob") is True
+    assert local_characters.confirm_auto_bind("Bob", "acct2") is True
 
     assert config.LOCAL_CHARACTERS["alice"]["account"] == "acct1"
     assert config.LOCAL_CHARACTERS["bob"]["account"] == "acct2"

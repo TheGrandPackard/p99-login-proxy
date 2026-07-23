@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from p99_sso_login_proxy import config, utils
@@ -25,13 +26,27 @@ _SAVE_DEBOUNCE_SEC = 0.25
 # binding suitable for pairing with the next new EQ log file.
 _LOCAL_METHODS = frozenset({"local", "local_char"})
 
-# The most recently observed local-account login. Set by note_login when a local
-# rewrite fires, cleared by any non-local login. Used by try_auto_create.
+# How long a pending local-account login stays eligible to be paired with a new EQ
+# log file. Bounds the window in which an unrelated later event (e.g. a stale log
+# file's mtime changing for reasons unconnected to a login) could be mis-attributed.
+_PENDING_LOCAL_LOGIN_TTL_SECONDS = 45.0
+
+# The most recently observed local-account login, and when it was recorded (via
+# time.monotonic()). Set by note_login when a local rewrite fires, cleared by any
+# non-local login. Consumed exactly once by try_auto_create, which clears it
+# immediately regardless of outcome.
 _pending_local_account: str | None = None
+_pending_local_account_ts: float = 0.0
 
 # Callbacks invoked (from the save-timer thread) whenever LOCAL_CHARACTERS mutates.
 # Subscribers are responsible for marshalling back to their UI thread.
 ON_UPDATED: list[Callable[[], None]] = []
+
+# Callbacks invoked when try_auto_create finds a plausible new character/account
+# pairing that needs a human to confirm before it's persisted and made usable for
+# credential rewrites. Subscribers are responsible for marshalling back to their UI
+# thread and, on approval, calling confirm_auto_bind().
+ON_AUTO_BIND_CANDIDATE: list[Callable[[str, str], None]] = []
 
 
 def _blank_items() -> dict[str, bool | int | None]:
@@ -189,16 +204,42 @@ def note_login(method: str, account: str | None) -> None:
     new log file to claim. Any other method clears the slot so a stale local
     login can't be mis-paired with a subsequent non-local session.
     """
-    global _pending_local_account
+    global _pending_local_account, _pending_local_account_ts
     with _lock:
-        _pending_local_account = account.strip().lower() or None if method in _LOCAL_METHODS and account else None
+        if method in _LOCAL_METHODS and account and account.strip():
+            _pending_local_account = account.strip().lower()
+            _pending_local_account_ts = time.monotonic()
+        else:
+            _pending_local_account = None
+
+
+def _consume_pending_local_account() -> str | None:
+    """Pop the pending local account, if any and not expired. Single-use."""
+    global _pending_local_account
+    pending = _pending_local_account
+    pending_ts = _pending_local_account_ts
+    _pending_local_account = None
+    if not pending:
+        return None
+    age = time.monotonic() - pending_ts
+    if age > _PENDING_LOCAL_LOGIN_TTL_SECONDS:
+        logger.warning(
+            "Discarding pending local login for %r: %.0fs old (limit %.0fs)",
+            pending,
+            age,
+            _PENDING_LOCAL_LOGIN_TTL_SECONDS,
+        )
+        return None
+    return pending
 
 
 def try_auto_create(character_name: str) -> bool:
-    """Create a minimal local-character row for *character_name* when a local
-    login is pending.
+    """Surface a candidate local-character binding for *character_name* when a
+    local login is pending, for a human to confirm via :data:`ON_AUTO_BIND_CANDIDATE`.
 
-    Returns ``True`` if a new row was added. Safe no-op (with a logged warning)
+    The pending login marker is consumed (cleared) exactly once by this call,
+    regardless of outcome, and is ignored if it has expired. Returns ``True`` if
+    a candidate was surfaced for confirmation. Safe no-op (with a logged warning)
     on collision with an existing row bound to a different account.
     """
     if not config.AUTO_ADD_LOCAL_CHARACTERS:
@@ -207,7 +248,7 @@ def try_auto_create(character_name: str) -> bool:
         return False
 
     with _lock:
-        pending = _pending_local_account
+        pending = _consume_pending_local_account()
         if not pending:
             return False
         if pending not in config.LOCAL_ACCOUNTS:
@@ -230,10 +271,35 @@ def try_auto_create(character_name: str) -> bool:
                 )
             return False
 
+    logger.info("Auto-bind candidate: %s -> account %s (awaiting confirmation)", character_name, pending)
+    for cb in list(ON_AUTO_BIND_CANDIDATE):
+        try:
+            cb(character_name, pending)
+        except Exception:
+            logger.exception("Error in local_characters ON_AUTO_BIND_CANDIDATE callback")
+    return True
+
+
+def confirm_auto_bind(character_name: str, account: str) -> bool:
+    """Persist an auto-bind candidate after a human has confirmed it.
+
+    Called by the UI layer in response to :data:`ON_AUTO_BIND_CANDIDATE`. Re-validates
+    the binding is still sane (the account wasn't removed and the character name
+    wasn't separately bound in the meantime) before writing it.
+    """
+    key = character_name.lower()
+    with _lock:
+        if account not in config.LOCAL_ACCOUNTS:
+            logger.warning("Not binding %s -> %s: account no longer exists", character_name, account)
+            return False
+        if key in config.LOCAL_CHARACTER_NAMES:
+            logger.warning("Not binding %s -> %s: character was bound in the meantime", character_name, account)
+            return False
+
         set_entry(
             {
                 "name": character_name,
-                "account": pending,
+                "account": account,
                 "class": None,
                 "level": None,
                 "bind": None,
@@ -243,5 +309,5 @@ def try_auto_create(character_name: str) -> bool:
         )
         mark_dirty()
 
-    logger.info("Auto-added local character %s -> account %s", character_name, pending)
+    logger.info("Auto-added local character %s -> account %s (confirmed)", character_name, account)
     return True

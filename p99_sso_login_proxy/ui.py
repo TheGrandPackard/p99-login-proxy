@@ -355,6 +355,7 @@ class ProxyUI(QMainWindow):
 
     power_resume_requested = Signal()
     local_characters_updated = Signal()
+    local_character_auto_bind_candidate = Signal(str, str)
 
     def __init__(self, parent=None, title: str | None = None):
         title = title or f"{config.APP_NAME} v{config.APP_VERSION}"
@@ -1135,6 +1136,12 @@ class ProxyUI(QMainWindow):
         )
         local_characters.ON_UPDATED.append(self.local_characters_updated.emit)
         self._refresh_local_characters_list()
+
+        self.local_character_auto_bind_candidate.connect(
+            self._on_auto_bind_candidate,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        local_characters.ON_AUTO_BIND_CANDIDATE.append(self.local_character_auto_bind_candidate.emit)
 
         main_layout.addWidget(notebook, 1)
 
@@ -1934,6 +1941,27 @@ class ProxyUI(QMainWindow):
                 semantic.active_blue if row[15] else semantic.active_amber,
             ),
         )
+
+    def _on_auto_bind_candidate(self, character_name: str, account: str) -> None:
+        """Ask the user to confirm a guessed character->account binding.
+
+        Fires when a new EQ log file is seen while a local-account login is
+        pending; the proxy doesn't have a reliable way to confirm the two are
+        actually related, so it must not be persisted (and therefore usable to
+        auto-fill credentials for future logins) without confirmation.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Confirm New Local Character",
+            f"Newly seen character '{character_name}' appeared after a login to "
+            f"local account '{account}'.\n\nBind '{character_name}' to account '{account}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            logger.info("Declined auto-bind candidate: %s -> %s", character_name, account)
+            return
+        if not local_characters.confirm_auto_bind(character_name, account):
+            QMessageBox.critical(self, "Error", f"Could not bind '{character_name}' to '{account}'.")
 
     def _refresh_local_characters_list(self):
         if not hasattr(self, "local_characters_list"):
