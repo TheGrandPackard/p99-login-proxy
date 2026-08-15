@@ -27,9 +27,18 @@ _SAVE_DEBOUNCE_SEC = 0.25
 _LOCAL_METHODS = frozenset({"local", "local_char"})
 
 # How long a pending local-account login stays eligible to be paired with a new EQ
-# log file. Bounds the window in which an unrelated later event (e.g. a stale log
-# file's mtime changing for reasons unconnected to a login) could be mis-attributed.
-_PENDING_LOCAL_LOGIN_TTL_SECONDS = 45.0
+# log file. Needs to comfortably cover the real gap between a login handshake and
+# the resulting new log file - P99's login queue alone routinely runs minutes long,
+# on top of character-select and world-connect/zone-load. A shorter window discards
+# the pairing for legitimate logins before the log file ever shows up, which forces
+# players to bind the character manually via the (unvalidated) Add Local Character
+# dialog instead - the actual source of most bad account references in the wild.
+# This is no longer the primary safeguard against mis-attribution (see
+# try_auto_create/log_handler.LogFileHandler: the marker is single-use and only
+# ever offered for a genuinely new log file, and nothing is persisted without human
+# confirmation via ON_AUTO_BIND_CANDIDATE) - it's just a sanity bound on how stale a
+# dangling marker can get.
+_PENDING_LOCAL_LOGIN_TTL_SECONDS = 15 * 60.0
 
 # The most recently observed local-account login, and when it was recorded (via
 # time.monotonic()). Set by note_login when a local rewrite fires, cleared by any

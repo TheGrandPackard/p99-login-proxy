@@ -74,13 +74,30 @@ class LoginProxy(asyncio.DatagramProtocol):
     # ------------------------------------------------------------------
     # Auth credential rewrite
     # ------------------------------------------------------------------
+    def _has_valid_local_character_binding(self, username: str) -> bool:
+        """Is *username* a local character bound to an account that still exists?
+
+        A character's ``account`` field can go stale (the account was renamed or
+        deleted without updating characters bound to it, or the row was written by
+        a since-fixed auto-add heuristic) without the character being removed from
+        :data:`config.LOCAL_CHARACTER_NAMES`. Such an entry can't be used for a
+        credential rewrite (see the "unknown account" branch in
+        :meth:`_try_sync_rewrite`), so it must not be treated as "handled locally"
+        for the purposes of deciding whether to attempt SSO instead.
+        """
+        if username not in config.LOCAL_CHARACTER_NAMES:
+            return False
+        character = config.LOCAL_CHARACTERS.get(username) or {}
+        account = (character.get("account") or "").lower()
+        return bool(account) and account in config.LOCAL_ACCOUNTS
+
     def _needs_sso(self, username: str) -> bool:
         """Return True if *username* should go through the SSO API."""
         return (
             not config.PROXY_ONLY
             and username not in config.SKIP_SSO_ACCOUNTS
             and username not in config.LOCAL_ACCOUNT_NAME_MAP
-            and username not in config.LOCAL_CHARACTER_NAMES
+            and not self._has_valid_local_character_binding(username)
             and username in config.ALL_CACHED_NAMES
             and bool(config.USER_API_TOKEN)
         )

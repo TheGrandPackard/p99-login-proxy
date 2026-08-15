@@ -1620,10 +1620,25 @@ class ProxyUI(QMainWindow):
             QMessageBox.critical(self, "Error", f"Account '{account_name}' not found.")
             return
 
+        bound_characters = sorted(
+            (data.get("name") or key)
+            for key, data in config.LOCAL_CHARACTERS.items()
+            if (data.get("account") or "").lower() == account_name.lower()
+        )
+        if bound_characters:
+            message = (
+                f"'{account_name}' is bound to {len(bound_characters)} local character(s): "
+                f"{', '.join(bound_characters)}.\n\n"
+                "Deleting it will orphan them - they won't be usable for login until you "
+                "either re-point them at a different account or remove them. Delete anyway?"
+            )
+        else:
+            message = f"Are you sure you want to delete the account '{account_name}'?"
+
         reply = QMessageBox.question(
             self,
             "Confirm Deletion",
-            f"Are you sure you want to delete the account '{account_name}'?",
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -1643,6 +1658,25 @@ class ProxyUI(QMainWindow):
             QMessageBox.critical(self, "Error", "Failed to save local accounts.")
         self.update_account_cache_display()
 
+    def _validate_local_character_account(self, account: str) -> bool:
+        """Block saving a local character bound to an account that doesn't exist.
+
+        The account field is free text (see ``LocalCharacterDialog``), so without
+        this check a typo or an account entered before it's created silently
+        produces an orphaned binding: the character can never be used to auto-fill
+        credentials, and instead of a clear error at save time it only surfaces
+        later, at login, as an "unknown account" warning.
+        """
+        if account and account not in config.LOCAL_ACCOUNTS:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Account '{account}' doesn't exist. Add it as a local account first, "
+                "or leave the account field blank.",
+            )
+            return False
+        return True
+
     def on_add_local_character(self):
         dialog = local_character_dialog.LocalCharacterDialog(self, title="Add Local Character")
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1654,6 +1688,8 @@ class ProxyUI(QMainWindow):
             return
         if name.lower() in config.LOCAL_CHARACTERS:
             QMessageBox.critical(self, "Error", f"Character '{name}' already exists.")
+            return
+        if not self._validate_local_character_account(result["account"]):
             return
         local_characters.set_entry(result)
         if not local_characters.save_now():
@@ -1691,6 +1727,8 @@ class ProxyUI(QMainWindow):
         result = dialog.get_result()
         # lock_name prevents renames, but guard anyway.
         result["name"] = entry.get("name") or name
+        if not self._validate_local_character_account(result["account"]):
+            return
         local_characters.set_entry(result)
         if not local_characters.save_now():
             QMessageBox.critical(self, "Error", "Failed to save local characters.")
