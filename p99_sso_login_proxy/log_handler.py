@@ -14,6 +14,7 @@ from p99_sso_login_proxy import (
     config,
     inventory_parser,
     local_characters,
+    shared_file_upload,
     ws_client,
     zone_translate,
 )
@@ -281,8 +282,28 @@ def _is_inventory_file_path(path: str) -> bool:
     return os.path.basename(path).lower().endswith("-inventory.txt")
 
 
-class InventoryFileHandler(FileSystemEventHandler):
-    """Watch EQ root for ``*-Inventory.txt`` writes and report ``items`` flags to the SSO API."""
+# How long a dump must sit unmodified before we act on it. EQ writes the file in
+# one pass, but watchdog reports on_created plus one or more on_modified per
+# write, and reading mid-write would ship a truncated inventory.
+SHARED_FILE_SETTLE_SECONDS = 1.0
+
+
+class SharedFileHandler(FileSystemEventHandler):
+    """Watch EQ roots for ``*-Inventory.txt`` / ``*-Spellbook.txt`` writes.
+
+    SSO characters get the raw file uploaded — the server parses it and derives
+    the key flags it sends back on the character tree. Local characters have no
+    server side, so their inventory is still parsed here into the local CSV.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # path -> sha256 of the last content we acted on. Every upload costs the
+        # server a delete-and-reinsert of the character's rows, so a file that
+        # was rewritten with identical contents is not worth sending.
+        self._last_uploaded: dict[str, str] = {}
+        self._timers: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
 
     def on_created(self, event):
         self._handle_event(event)
@@ -291,31 +312,74 @@ class InventoryFileHandler(FileSystemEventHandler):
         self._handle_event(event)
 
     def _handle_event(self, event):
-        if event.is_directory or not _is_inventory_file_path(event.src_path):
+        if event.is_directory or not shared_file_upload.is_uploadable_file_path(event.src_path):
             return
         if not _any_character_tracked():
             return
-        character_name = inventory_parser.character_name_from_inventory_path(event.src_path)
+        self._schedule(event.src_path)
+
+    def _schedule(self, path: str):
+        """Debounce a burst of watchdog events for *path* into one process call."""
+        with self._lock:
+            existing = self._timers.pop(path, None)
+            if existing:
+                existing.cancel()
+            timer = threading.Timer(SHARED_FILE_SETTLE_SECONDS, self._process, args=(path,))
+            timer.daemon = True
+            self._timers[path] = timer
+            timer.start()
+
+    def _process(self, path: str):
+        with self._lock:
+            self._timers.pop(path, None)
+
+        character_name = shared_file_upload.character_name_from_path(path)
         if not character_name:
             return
         in_sso, in_local = _classify_character(character_name)
         if not (in_sso or in_local):
             return
-        try:
-            flags = inventory_parser.parse_inventory_file(event.src_path)
-        except Exception:
-            logger.exception("Failed to parse inventory file: %s", event.src_path)
+
+        encoded = shared_file_upload.read_and_encode(path)
+        if encoded is None:
             return
-        items = {k: flags[k] for k in inventory_parser.ALL_INVENTORY_WIRE_KEYS}
-        logger.info(
-            "Inventory update for `%s`: %s",
-            character_name,
-            " ".join(f"{k}={items[k]}" for k in inventory_parser.ALL_INVENTORY_WIRE_KEYS),
-        )
+        digest, payload = encoded
+        if self._last_uploaded.get(path) == digest:
+            logger.debug("Shared info file unchanged, skipping: %s", path)
+            return
+
+        filename = os.path.basename(path)
+        handled = True
+
         if in_sso:
-            _run_async(ws_client.send_update_location(character_name, items=items))
-        if in_local:
-            local_characters.apply_update(character_name, items=items)
+            if ws_client.is_connected():
+                logger.info("Uploading `%s` for `%s`", filename, character_name)
+                _run_async(ws_client.send_shared_file(filename, payload, shared_file_upload.WIRE_ENCODING))
+            else:
+                # The send would be dropped on the floor. Leave the digest
+                # unrecorded so the next write of this file still goes out.
+                logger.info("WebSocket down, skipping upload of `%s`", filename)
+                handled = False
+
+        # Local characters live only in the local CSV, so their flags are still
+        # parsed here. Spellbooks have no local representation.
+        if in_local and _is_inventory_file_path(path):
+            try:
+                flags = inventory_parser.parse_inventory_file(path)
+            except Exception:
+                logger.exception("Failed to parse inventory file: %s", path)
+                handled = False
+            else:
+                items = {k: flags[k] for k in inventory_parser.ALL_INVENTORY_WIRE_KEYS}
+                logger.info(
+                    "Local inventory update for `%s`: %s",
+                    character_name,
+                    " ".join(f"{k}={items[k]}" for k in inventory_parser.ALL_INVENTORY_WIRE_KEYS),
+                )
+                local_characters.apply_update(character_name, items=items)
+
+        if handled:
+            self._last_uploaded[path] = digest
 
 
 def _deduped_eq_roots(primary: str) -> list[tuple[str, str]]:
@@ -401,11 +465,11 @@ def set_log_watch_directory(eq_directory, timer_parent: QWidget):
         logger.info("Watchdog observer started (backend: %s)", type(LOG_OBSERVER).__name__)
 
     if not INVENTORY_OBSERVER:
-        inv_handler = InventoryFileHandler()
+        inv_handler = SharedFileHandler()
         INVENTORY_OBSERVER = Observer()
         for root_path, root_label in eq_roots:
             INVENTORY_OBSERVER.schedule(inv_handler, root_path, recursive=False)
-            logger.info("Inventory file watcher scheduled on: %s (%s EQ root)", root_path, root_label)
+            logger.info("Shared info file watcher scheduled on: %s (%s EQ root)", root_path, root_label)
         INVENTORY_OBSERVER_THREAD = threading.Thread(target=INVENTORY_OBSERVER.start, daemon=True)
         INVENTORY_OBSERVER_THREAD.start()
-        logger.info("Inventory file watcher started (backend: %s)", type(INVENTORY_OBSERVER).__name__)
+        logger.info("Shared info file watcher started (backend: %s)", type(INVENTORY_OBSERVER).__name__)

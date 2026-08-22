@@ -121,6 +121,29 @@ async def send_update_location(
             _last_sent_location[char_key] = tentative
 
 
+async def send_shared_file(filename: str, content: str, encoding: str):
+    """Upload a raw EQ inventory/spellbook dump to the SSO API over WebSocket.
+
+    *filename* must be the exact on-disk basename — the server derives the
+    character name from it and ignores any client-supplied name. *content* is
+    the encoded payload from ``shared_file_upload.read_and_encode``.
+    """
+    if _ws and _connected:
+        try:
+            await _ws.send(
+                json.dumps(
+                    {
+                        "type": "shared_file_upload",
+                        "filename": filename,
+                        "encoding": encoding,
+                        "content": content,
+                    }
+                )
+            )
+        except Exception:
+            logger.debug("Failed to send shared_file_upload", exc_info=True)
+
+
 async def send_fte(mob: str, player: str, character_name: str, eq_log_time: str):
     """Send a first-to-engage line to the SSO API over WebSocket.
 
