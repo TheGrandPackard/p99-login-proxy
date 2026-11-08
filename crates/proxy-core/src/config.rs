@@ -81,12 +81,33 @@ pub fn config_file_path() -> Option<PathBuf> {
             return Some(cwd.join("proxyconfig.ini"));
         }
     }
+    let current_exe = std::env::current_exe().ok();
+    if cfg!(target_os = "macos") && current_exe.as_deref().is_some_and(is_macos_app_bundle_exe) {
+        if let Some(dirs) = project_dirs() {
+            return Some(dirs.config_dir().join("proxyconfig.ini"));
+        }
+    }
     let appimage = if cfg!(target_os = "linux") {
         std::env::var_os("APPIMAGE").map(PathBuf::from)
     } else {
         None
     };
-    release_config_file_path(appimage, std::env::current_exe().ok())
+    release_config_file_path(appimage, current_exe)
+}
+
+/// True for `<name>.app/Contents/MacOS/<exe>`. A bundle must stay unmodified to
+/// keep its code signature valid, so its files cannot live beside the executable.
+fn is_macos_app_bundle_exe(exe: &Path) -> bool {
+    let macos = exe.parent();
+    let contents = macos.and_then(Path::parent);
+    let bundle = contents.and_then(Path::parent);
+    macos.and_then(Path::file_name) == Some("MacOS".as_ref())
+        && contents.and_then(Path::file_name) == Some("Contents".as_ref())
+        && bundle.and_then(Path::extension) == Some("app".as_ref())
+}
+
+fn project_dirs() -> Option<ProjectDirs> {
+    ProjectDirs::from("com", "P99LoginProxy", "P99LoginProxy")
 }
 
 fn release_config_file_path(
@@ -99,8 +120,7 @@ fn release_config_file_path(
 }
 
 fn legacy_native_config_file_path() -> Option<PathBuf> {
-    ProjectDirs::from("com", "P99LoginProxy", "P99LoginProxy")
-        .map(|dirs| dirs.config_dir().join("config.toml"))
+    project_dirs().map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,6 +544,21 @@ mod tests {
             release_config_file_path(Some(appimage), Some(mounted_exe)),
             Some(PathBuf::from("/home/player/proxyconfig.ini"))
         );
+    }
+
+    #[test]
+    fn detects_macos_app_bundle_executable() {
+        for (exe, expected) in [
+            (
+                "/Applications/P99 Login Proxy.app/Contents/MacOS/P99LoginProxy",
+                true,
+            ),
+            ("/Users/player/target/release/P99LoginProxy", false),
+            ("/Users/player/Contents/MacOS/P99LoginProxy", false),
+            ("/P99LoginProxy", false),
+        ] {
+            assert_eq!(is_macos_app_bundle_exe(Path::new(exe)), expected, "{exe}");
+        }
     }
 
     #[test]

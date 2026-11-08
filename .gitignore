@@ -18,13 +18,17 @@ target
 !tests/fixtures/**/*.ini
 *.csv
 !tests/fixtures/**/*.csv
-*.log
 test-portable/
 
 # Local release/build outputs (never commit)
 P99LoginProxy-*.exe
 P99LoginProxy-*.zip
 *.AppImage
+
+# Python tooling and leftovers from the Python client
+/build/
+__pycache__/
+*.egg-info/
 
 # Editor directories and files
 .vscode/*

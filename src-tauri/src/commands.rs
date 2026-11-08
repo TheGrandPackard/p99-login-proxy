@@ -643,7 +643,10 @@ pub fn launch_everquest_at(dir: &std::path::Path, launch_admin: bool) -> Result<
         // Linux/macOS launch it through Wine (`wine eqgame.exe patchme`).
         use std::os::unix::process::CommandExt;
 
-        std::process::Command::new("wine")
+        let mut command = std::process::Command::new("wine");
+        #[cfg(target_os = "macos")]
+        command.env("PATH", macos_wine_search_path());
+        command
             .current_dir(dir)
             .arg(&exe)
             .arg("patchme")
@@ -659,6 +662,22 @@ pub fn launch_everquest_at(dir: &std::path::Path, launch_admin: bool) -> Result<
             })?;
         Ok(())
     }
+}
+
+/// Apps opened from Finder get launchd's minimal PATH, which has no Wine, so
+/// append the usual install locations. Spawning uses this PATH to find `wine`.
+#[cfg(target_os = "macos")]
+fn macos_wine_search_path() -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::env::split_paths(&inherited).chain(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Applications/Wine Stable.app/Contents/Resources/wine/bin",
+        ]
+        .map(std::path::PathBuf::from),
+    );
+    std::env::join_paths(dirs).unwrap_or(inherited)
 }
 
 #[cfg(windows)]

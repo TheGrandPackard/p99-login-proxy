@@ -34,13 +34,16 @@ Regenerate protocol oracle fixtures:
 
 - Windows 10/11 (portable `P99LoginProxy.exe` zip + Python-compatible self-update)
 - Linux x86_64 (manual native build; WebKitGTK required)
+- macOS (local builds only; `npm run build:mac` produces an ad-hoc signed
+  `target/release/bundle/macos/P99 Login Proxy.app`, without self-update)
 
-Linux can launch `wine eqgame.exe patchme` when Wine is on `PATH`.
+Linux and macOS can launch `wine eqgame.exe patchme` when Wine is installed.
 
 ## Portable configuration
 
 `proxyconfig.ini`, `local_accounts.csv`, `local_characters.csv`, and `proxy.log` live
-beside the executable. Existing Python INI settings are preserved. Plaintext API tokens
+beside the executable, except in the macOS `.app`, which keeps them in
+`~/Library/Application Support/com.P99LoginProxy.P99LoginProxy/`. Existing Python INI settings are preserved. Plaintext API tokens
 are migrated to the OS keyring on first launch and removed from the INI. The login DES
 key and IV default to eight zero bytes, matching the game protocol.
 
