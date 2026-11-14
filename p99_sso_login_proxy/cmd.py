@@ -191,6 +191,19 @@ def _enforce_single_instance() -> bool:
 
 
 def main():
+    upstream_exe = updater.upstream_exe_to_forward(sys.executable, sys.argv)
+    if upstream_exe:
+        import subprocess
+
+        logger.info("Upstream build installed; launching %s instead", upstream_exe)
+        subprocess.Popen([upstream_exe], cwd=os.path.dirname(upstream_exe))
+        sys.exit(0)
+
+    try:
+        config.persist_backend_pin()
+    except OSError:
+        logger.exception("Could not save the Kingdom backend name to proxyconfig.ini")
+
     qt_app = QtAsyncApp(sys.argv)
     theme.apply_app_theme(qt_app, dark_mode=config.DARK_MODE)
 

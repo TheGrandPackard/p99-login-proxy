@@ -9,6 +9,62 @@ CONFIG = configparser.ConfigParser()
 CONFIG.optionxform = str
 CONFIG.read("proxyconfig.ini")
 
+KINGDOM_SSO_URL = "https://bot.kingdomdkp.com"
+# Upstream (eq-p99-tools) ships this backend as "Kingdom"; this fork called it "Kingdom Login Proxy".
+KINGDOM_BACKEND_NAME = "Kingdom"
+LEGACY_KINGDOM_BACKEND_NAME = "Kingdom Login Proxy"
+
+
+def pin_kingdom_backend(cfg: configparser.ConfigParser) -> bool:
+    """Name the Kingdom backend explicitly, the way upstream expects. Returns True if cfg changed.
+
+    This fork never wrote ``sso_api_name`` for its only built-in backend. Upstream reads a
+    missing name as its own default guild and would send the Kingdom token to that guild's
+    server, so the hand-off release writes the name, URL and token under upstream's key.
+    Installs pointed at a custom backend are left alone.
+    """
+    defaults = cfg.defaults()
+    name = defaults.get("sso_api_name", "").strip()
+    url = defaults.get("sso_api", "").strip().rstrip("/")
+    if name not in ("", KINGDOM_BACKEND_NAME, LEGACY_KINGDOM_BACKEND_NAME) or url not in ("", KINGDOM_SSO_URL):
+        return False
+
+    changed = False
+    for key, value in (("sso_api_name", KINGDOM_BACKEND_NAME), ("sso_api", KINGDOM_SSO_URL)):
+        if defaults.get(key) != value:
+            cfg.set("DEFAULT", key, value)
+            changed = True
+
+    def _token(option: str) -> str:
+        if not cfg.has_section("api_tokens"):
+            return ""
+        return cfg.get("api_tokens", option, fallback="").strip()
+
+    if not _token(KINGDOM_BACKEND_NAME):
+        token = _token(LEGACY_KINGDOM_BACKEND_NAME) or defaults.get("user_api_token", "").strip()
+        if token:
+            if not cfg.has_section("api_tokens"):
+                cfg.add_section("api_tokens")
+            # The old key stays so a rollback to an earlier fork build still finds its token.
+            cfg.set("api_tokens", KINGDOM_BACKEND_NAME, token)
+            changed = True
+    return changed
+
+
+# Applied in memory here; cmd.main() persists it (persist_backend_pin) so importing this module never writes.
+_BACKEND_PIN_PENDING = pin_kingdom_backend(CONFIG)
+
+
+def persist_backend_pin() -> None:
+    """Write proxyconfig.ini if pin_kingdom_backend changed it at import."""
+    global _BACKEND_PIN_PENDING
+    if not _BACKEND_PIN_PENDING:
+        return
+    with open("proxyconfig.ini", "w", encoding="utf-8") as configfile:
+        CONFIG.write(configfile)
+    _BACKEND_PIN_PENDING = False
+
+
 APP_NAME = "P99 Login Proxy"
 APP_VERSION = __version_semver__
 CHANGELOG = ""
@@ -31,7 +87,7 @@ except socket.gaierror:
 EQEMU_ADDR = (EQEMU_LOGIN_IP, EQEMU_PORT)
 
 SSO_API_OPTIONS = [
-    ("Kingdom Login Proxy", "https://bot.kingdomdkp.com"),
+    (KINGDOM_BACKEND_NAME, KINGDOM_SSO_URL),
 ]
 if __version_semver__.prerelease:
     SSO_API_OPTIONS.append(("Localhost", "http://localhost:5998"))

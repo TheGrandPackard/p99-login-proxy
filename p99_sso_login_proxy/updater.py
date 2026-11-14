@@ -83,9 +83,12 @@ except Exception as e:
     LOG = PrintLogger()
     LOG.warning("Failed to set up logging: %s", e)
 
-GITHUB_API_LATEST_RELEASE_URL = "https://api.github.com/repos/TheGrandPackard/p99-login-proxy/releases/latest"
-GITHUB_API_TAGGED_RELEASE_URL = "https://api.github.com/repos/TheGrandPackard/p99-login-proxy/releases/tags/{tag}"
-GITHUB_API_RELEASES_URL = "https://api.github.com/repos/TheGrandPackard/p99-login-proxy/releases?per_page={max_releases}"
+# Hand-off release: this build takes its updates from upstream, so the next update
+# replaces the Kingdom fork with the mainstream P99 Login Proxy.
+GITHUB_REPO = "eq-p99-tools/p99-login-proxy"
+GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_API_TAGGED_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{{tag}}"
+GITHUB_API_RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page={{max_releases}}"
 
 REQUEST_TIMEOUT = (5, 15)  # (connect, read) in seconds
 
@@ -119,7 +122,11 @@ def get_recent_releases(max_releases=10):
         releases = []
 
         for release in releases_data:
-            version = semver.Version.parse(release["tag_name"].lstrip("v"))
+            try:
+                version = semver.Version.parse(release["tag_name"].lstrip("v"))
+            except ValueError:
+                LOG.warning("Skipping release with non-semver tag: %s", release["tag_name"])
+                continue
             releases.append(
                 {
                     "version": version,
@@ -167,18 +174,24 @@ def compile_changelog(releases):
     return markdown.markdown(changelog)
 
 
+def select_zip_asset_url(asset_data: list[dict]) -> str | None:
+    """Return the download URL of the release's Windows zip.
+
+    Chosen by name only: upstream releases also carry AppImages, some uploaded as
+    application/octet-stream, which a content-type match would mistake for the zip.
+    """
+    for asset in asset_data:
+        if asset.get("name", "").lower().endswith(".zip"):
+            return asset["browser_download_url"]
+    return None
+
+
 def download_and_unpack(url: str):
     """Download and unpack the update zip file"""
     # pylint: disable=no-member
     resp = get(url)
     resp.raise_for_status()
-    asset_data = resp.json()
-    ZIP_CONTENT_TYPES = {"application/x-zip-compressed", "application/zip", "application/octet-stream"}
-    zip_url = None
-    for asset in asset_data:
-        if asset["content_type"] in ZIP_CONTENT_TYPES or asset.get("name", "").endswith(".zip"):
-            zip_url = asset["browser_download_url"]
-            break
+    zip_url = select_zip_asset_url(resp.json())
     if zip_url:
         LOG.info("Downloading update from %s", zip_url)
         zip_data = get(zip_url, stream=True)
@@ -218,7 +231,23 @@ def download_and_unpack(url: str):
     return None
 
 
-STABLE_EXE_NAME = "KingdomLoginProxy.exe"
+# Upstream's name. Its own updater refuses to run under any other name, so the
+# downloaded build must land here rather than on KingdomLoginProxy.exe.
+STABLE_EXE_NAME = "P99LoginProxy.exe"
+
+
+def upstream_exe_to_forward(executable: str, argv: list[str]) -> str | None:
+    """Path of an installed upstream build to run instead of this one, if any.
+
+    After the hand-off, old shortcuts still point at KingdomLoginProxy.exe. Rather than
+    start the retired fork again, pass the launch on to P99LoginProxy.exe beside it.
+    ``--no-forward`` keeps this build running (for rollback).
+    """
+    name = os.path.basename(executable).lower()
+    if not name.startswith("kingdomloginproxy") or "--no-forward" in argv:
+        return None
+    candidate = os.path.join(os.path.dirname(os.path.abspath(executable)), STABLE_EXE_NAME)
+    return candidate if os.path.isfile(candidate) else None
 
 
 def _prompt_and_apply_update(releases, latest_version):
@@ -227,9 +256,11 @@ def _prompt_and_apply_update(releases, latest_version):
     result = QMessageBox.question(
         parent,
         "Update Available",
-        "A new update is available. Would you like to update?\n\n"
+        "Kingdom Login Proxy is moving back to the main P99 Login Proxy release. "
+        "Would you like to update now?\n\n"
         f"Your version: {config.APP_VERSION}\n"
-        f"New version: {latest_version}",
+        f"New version: {latest_version}\n\n"
+        f"The app will restart as {STABLE_EXE_NAME}. Your settings and API token carry over.",
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         QMessageBox.StandardButton.Yes,
     )
@@ -307,8 +338,9 @@ def on_releases_fetched_main_thread(releases, notify_no_update):
             )
         return
 
-    prerelease_ok = config.APP_VERSION.prerelease or config.OPT_INTO_PRERELEASES
-    visible_releases = releases if prerelease_ok else [r for r in releases if not r["prerelease"]]
+    # Upstream's 2.x line is only published as prereleases so far, and it is where this
+    # build is headed, so prereleases are always eligible here.
+    visible_releases = releases
 
     config.CHANGELOG = compile_changelog(visible_releases)
     top_window = QApplication.activeWindow()
