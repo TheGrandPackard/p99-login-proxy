@@ -2,6 +2,7 @@ mod commands;
 mod icons;
 mod logging;
 mod notifications;
+mod resume;
 mod state;
 mod tray;
 mod updater;
@@ -21,10 +22,20 @@ pub fn wait_for_update_parent_if_requested() -> Result<(), String> {
 }
 
 pub fn normalize_release_working_directory() {
+    // AppRun starts an AppImage in `$APPDIR/usr`. Bundled WebKitGTK resolves
+    // `WebKitNetworkProcess` relative to that directory, so moving away from it
+    // aborts startup. Config, logs, and CSVs already use `$APPIMAGE`.
     #[cfg(not(debug_assertions))]
-    if let Some(dir) = portable_app_directory() {
-        let _ = std::env::set_current_dir(dir);
+    if !release_keeps_process_cwd(std::env::var_os("APPIMAGE").as_deref()) {
+        if let Some(dir) = portable_app_directory() {
+            let _ = std::env::set_current_dir(dir);
+        }
     }
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn release_keeps_process_cwd(appimage: Option<&std::ffi::OsStr>) -> bool {
+    cfg!(target_os = "linux") && appimage.is_some()
 }
 
 pub fn portable_app_directory() -> Option<std::path::PathBuf> {
@@ -42,13 +53,9 @@ pub fn portable_app_directory() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
 }
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use proxy_core::window_title;
-use runtime::{AppSupervisor, LogStore};
+use runtime::LogStore;
 use tauri::Manager;
-use tokio::sync::Mutex;
 
 use crate::logging::init as init_logging;
 use crate::state::AppState;
@@ -58,25 +65,6 @@ fn apply_main_window_title(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title(&window_title());
     }
-}
-
-/// Detect a system suspend/resume by watching for wall-clock jumps and bounce
-/// the UDP transport so the proxy keeps working after the machine wakes.
-fn spawn_resume_monitor(supervisor: Arc<Mutex<AppSupervisor>>) {
-    const TICK: Duration = Duration::from_secs(10);
-    const RESUME_GAP: Duration = Duration::from_secs(30);
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let before = Instant::now();
-            tokio::time::sleep(TICK).await;
-            if before.elapsed() > TICK + RESUME_GAP {
-                let mut sup = supervisor.lock().await;
-                if let Err(e) = sup.bounce_proxy_transport().await {
-                    tracing::warn!(error = %e, "resume proxy restart failed");
-                }
-            }
-        }
-    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -142,7 +130,7 @@ pub fn run() {
             });
 
             if let Some(state) = app.try_state::<AppState>() {
-                spawn_resume_monitor(state.supervisor.clone());
+                resume::spawn_resume_monitor(state.supervisor.clone());
             }
             Ok(())
         })
@@ -200,12 +188,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::portable_app_directory;
+    use std::ffi::OsStr;
+
+    use super::{portable_app_directory, release_keeps_process_cwd};
 
     #[test]
     fn portable_app_directory_prefers_current_exe_parent() {
         let exe = std::env::current_exe().expect("current_exe");
         let expected = exe.parent().expect("exe parent");
         assert_eq!(portable_app_directory().as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn an_appimage_keeps_the_process_working_directory() {
+        let appimage = OsStr::new("/home/player/P99LoginProxy.AppImage");
+        assert_eq!(
+            release_keeps_process_cwd(Some(appimage)),
+            cfg!(target_os = "linux")
+        );
+        assert!(!release_keeps_process_cwd(None));
     }
 }
