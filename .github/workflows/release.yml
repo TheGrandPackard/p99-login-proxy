@@ -171,8 +171,51 @@ jobs:
           name: linux-release
           path: P99LoginProxy-*-x86_64.AppImage
 
+  build-macos-x86_64:
+    needs: [validate-tag, quality]
+    # Apple Silicon runner cross-compiling for Intel Macs.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Add target to pinned toolchain
+        run: rustup target add x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Stamp release version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/stamp-release-version.mjs "$version"
+      - run: npm ci
+      - name: Build app bundle
+        run: npm run tauri build -- --target x86_64-apple-darwin --config src-tauri/tauri.macos.bundle.json
+        env:
+          CI: true
+      - name: Package app bundle zip
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bundle_dir="target/x86_64-apple-darwin/release/bundle/macos"
+          app="$(find "$bundle_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$app" ]; then
+            echo "App bundle not found under $bundle_dir" >&2
+            ls -la "$bundle_dir" >&2 || true
+            exit 1
+          fi
+          lipo -archs "$app/Contents/MacOS/"* | grep -qx x86_64
+          ditto -c -k --keepParent "$app" "P99LoginProxy-${version}-macos-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64-release
+          path: P99LoginProxy-*-macos-x86_64.zip
+
   publish:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos-x86_64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -192,7 +235,7 @@ jobs:
         working-directory: upload
         run: |
           sha256sum *.zip *.AppImage > SHA256SUMS
-          test "$(wc -l < SHA256SUMS)" -eq 2
+          test "$(wc -l < SHA256SUMS)" -eq 3
           sha256sum --check SHA256SUMS
       - name: Release version
         id: release_version
