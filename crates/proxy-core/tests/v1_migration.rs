@@ -124,11 +124,14 @@ fn custom_backend_resolves_api_url_and_dropdown() {
 #[test]
 fn discovers_eq_directory_when_blank_and_persists() {
     let dir = TempDir::new().unwrap();
-    let eq_dir = dir.path().join("EverQuest");
+    // macOS temp dirs sit under the /var -> /private/var symlink, and the
+    // discovered path comes from the resolved working directory.
+    let root = dir.path().canonicalize().unwrap();
+    let eq_dir = root.join("EverQuest");
     std::fs::create_dir(&eq_dir).unwrap();
     std::fs::write(eq_dir.join("eqgame.exe"), b"stub").unwrap();
 
-    let config_path = dir.path().join("proxyconfig.ini");
+    let config_path = root.join("proxyconfig.ini");
     std::fs::write(&config_path, "[DEFAULT]\neq_directory = \n").unwrap();
 
     let mut file = ConfigFileV1::default();
